@@ -416,7 +416,9 @@ export function updateShoppingListItem(
  * Get User shopping List by MealPlan id
  * Returns null if no shopping list is found
  */
-export function getMealPlanShoppingList(mealPlanId: string): ShoppingList | null {
+export function getMealPlanShoppingList(
+  mealPlanId: string,
+): ShoppingList | null {
   const vars = new neo4j.Variables();
   vars.set("mealPlanId", mealPlanId);
 
@@ -573,28 +575,30 @@ export function getPersonalizedRecommendations(
     const results = record.getValue<SearchResult[]>("results");
     for (let j = 0; j < results.length; j++) {
       const resultObj = results[j];
-      recipes.push(new SearchResult(
-        new Recipe(
-          resultObj.recipe.id,
-          resultObj.recipe.name,
-          resultObj.recipe.difficulty,
-          resultObj.recipe.cookingTime,
-          resultObj.recipe.servingSize,
-          resultObj.recipe.calories,
-          resultObj.recipe.cost,
-          resultObj.recipe.popularityScore,
-          resultObj.recipe.seasonalAvailability,
-          resultObj.recipe.cuisine,
-          resultObj.recipe.preparationSteps,
-          resultObj.recipe.rating,
-          resultObj.recipe.ingredients,
-          resultObj.recipe.allergens,
-          resultObj.recipe.occasions,
-          resultObj.recipe.seasons,
-          resultObj.recipe.favourite
+      recipes.push(
+        new SearchResult(
+          new Recipe(
+            resultObj.recipe.id,
+            resultObj.recipe.name,
+            resultObj.recipe.difficulty,
+            resultObj.recipe.cookingTime,
+            resultObj.recipe.servingSize,
+            resultObj.recipe.calories,
+            resultObj.recipe.cost,
+            resultObj.recipe.popularityScore,
+            resultObj.recipe.seasonalAvailability,
+            resultObj.recipe.cuisine,
+            resultObj.recipe.preparationSteps,
+            resultObj.recipe.rating,
+            resultObj.recipe.ingredients,
+            resultObj.recipe.allergens,
+            resultObj.recipe.occasions,
+            resultObj.recipe.seasons,
+            resultObj.recipe.favourite,
+          ),
+          resultObj.score,
         ),
-        resultObj.score
-      ));
+      );
     }
   }
   return recipes;
@@ -603,10 +607,7 @@ export function getPersonalizedRecommendations(
 /**
  * Find similar recipes based on ingredients and cuisine
  */
-export function findSimilarRecipes(
-  recipeId: string,
-  limit: i32 = 5,
-): Recipe[] {
+export function findSimilarRecipes(recipeId: string, limit: i32 = 5): Recipe[] {
   const vars = new neo4j.Variables();
   vars.set("recipeId", recipeId);
   vars.set("limit", limit);
@@ -809,23 +810,27 @@ export function getAllMealPlans(userId: string): MealPlan[] {
   vars.set("userId", userId);
 
   const query = `
-    MATCH (u:User {id: $userId})-[:HAS_PLAN]->(mp:MealPlan)
-    MATCH (mp)-[:CONTAINS]->(pm:PlannedMeal)-[:USES]->(r:Recipe)
-    
-    WITH mp, u,
-        collect({
-          recipeId: pm.recipeId,
-          date: toString(pm.date),
-          mealType: pm.mealType,
-          servings: pm.servings
-        }) as meals
-    RETURN {
-      id: mp.id,
-      userId: u.user_id,
-      startDate: toString(mp.startDate),
-      endDate: toString(mp.endDate),
-      meals:meals
-    } as mealPlan
+MATCH (u:User {id: $userId})-[:HAS_PLAN]->(mp:MealPlan)
+OPTIONAL MATCH (mp)-[:CONTAINS]->(pm:PlannedMeal)-[:USES]->(r:Recipe)
+WITH mp, u, collect({
+    recipeId: pm.recipeId,
+    date: toString(pm.date),
+    mealType: pm.mealType,
+    servings: pm.servings
+}) as allMeals
+WITH mp, u, 
+    CASE 
+        WHEN size(allMeals) = 0 OR all(meal IN allMeals WHERE meal.recipeId IS NULL) 
+        THEN []
+        ELSE [meal IN allMeals WHERE meal.recipeId IS NOT NULL]
+    END as meals
+RETURN {
+    id: mp.id,
+    userId: u.id,
+    startDate: toString(mp.startDate),
+    endDate: toString(mp.endDate),
+    meals: meals
+} as mealPlan
     `;
 
   const result = neo4j.executeQuery(hostName, query, vars);
@@ -918,7 +923,6 @@ export function getRecipeById(recipeId: string, userId: string): Recipe {
 
   return JSON.parse<Recipe>(result.Records[0].get("recipe"));
 }
-
 
 /**
  * Delete a meal from the plan and update the shopping list
