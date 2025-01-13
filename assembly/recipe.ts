@@ -90,14 +90,19 @@ export function createUser(
   id: string,
   email: string,
   name: string,
-  allergens: string[],
-  favoriteCuisines: string[],
-  skillLevel: string,
+  allergens: string[] = [], // Made optional with default empty array
+  favoriteCuisines: string[] = [], // Made optional with default empty array
+  skillLevel: string = "beginner", // Added default skill level
 ): boolean {
   const preferences = new UserPreferences();
+  // Set defaults for dietary preferences
   preferences.allergens = allergens;
-  preferences.favoriteCuisines = favoriteCuisines;
+  preferences.favoriteCuisines =
+    favoriteCuisines.length > 0
+      ? favoriteCuisines
+      : ["Italian", "American", "Mexican"]; // Default cuisines if none provided
   preferences.skillLevel = skillLevel;
+  preferences.dietaryRestrictions = []; // Default empty dietary restrictions
 
   const user = new User(id, email, name, preferences);
 
@@ -112,7 +117,7 @@ export function createUser(
     name: $user.name
   })
   
-  // Create preferences node and relationship
+  // Create preferences node with defaults
   CREATE (p:UserPreferences {
     dietaryRestrictions: $user.preferences.dietaryRestrictions,
     allergens: $user.preferences.allergens,
@@ -121,7 +126,7 @@ export function createUser(
   })
   CREATE (u)-[:HAS_PREFERENCES]->(p)
   
-  // Connect allergens
+  // Connect allergens if any
   WITH u, p
   UNWIND $user.preferences.allergens as allergen
   MERGE (a:Allergen {name: allergen})
@@ -501,109 +506,138 @@ export function getMealPlansInDateRange(
 export function getPersonalizedRecommendations(
   userId: string,
   limit: i32 = 5,
-): SearchResult[] {
+): Recipe[] {
   const vars = new neo4j.Variables();
   vars.set("userId", userId);
   vars.set("limit", limit);
 
   const query = `
-    // Cypher query (unchanged)
-    MATCH (u:User {id: $userId})-[:HAS_PREFERENCES]->(prefs:UserPreferences)
-    MATCH (r:Recipe)
-    WHERE r.difficulty = prefs.skillLevel
-      AND r.cooking_time <= prefs.maxCookingTime
-    MATCH (r)-[:HAS_CUISINE]->(c:Cuisine)
-    WHERE c.name IN prefs.favoriteCuisines
-    WITH r, prefs, u, c
-    WHERE NOT EXISTS {
-        MATCH (r)<-[:PRESENT_IN]-(a:Allergen)
-        WHERE a.name IN prefs.allergens
-    }
-    OPTIONAL MATCH (r)<-[ratingRel:RATED]-(ratedBy:User)
-    WITH r, u, prefs, c,
-         avg(ratingRel.rating) AS avgRating,
-         CASE WHEN r.id IN u.favoriteRecipes THEN 1 ELSE 0 END AS isFavorite
-    WITH r, c, avgRating, isFavorite,
-         (r.popularity_score * 0.2 +
-          coalesce(avgRating, 0) * 0.3 +
-          isFavorite * 0.2 +
-          r.seasonal_availability * 0.15 +
-          (1.0 / (1.0 + r.cost)) * 0.15
-         ) AS score
-    OPTIONAL MATCH (r)<-[:USED_IN]-(i:Ingredient)
-    OPTIONAL MATCH (r)<-[:PRESENT_IN]-(a:Allergen)
-    OPTIONAL MATCH (r)-[:SUITABLE_FOR]->(o:Occasion)
-    OPTIONAL MATCH (r)-[:BEST_IN]->(s:Season)
-    OPTIONAL MATCH (r)-[:HAS_STEP]->(p:PreparationStep)
-    WITH r, c, score, avgRating, isFavorite,
-         collect(DISTINCT i.name) AS ingredients,
-         collect(DISTINCT a.name) AS allergens,
-         collect(DISTINCT o.name) AS occasions,
-         collect(DISTINCT s.name) AS seasons,
-         collect(DISTINCT p.description) AS preparationSteps
-    WITH {
-        recipe: {
-            id: r.id,
-            name: r.name,
-            difficulty: r.difficulty,
-            cookingTime: r.cooking_time,
-            servingSize: r.serving_size,
-            calories: r.calories,
-            cost: r.cost,
-            popularityScore: r.popularity_score,
-            seasonalAvailability: r.seasonal_availability,
-            ingredients: ingredients,
-            allergens: allergens,
-            cuisine: c.name,
-            occasions: occasions,
-            seasons: seasons,
-            preparationSteps: preparationSteps,
-            rating: coalesce(avgRating, 0.0)
-        },
-        score: score
-    } AS result
-    ORDER BY score DESC
-    LIMIT toInteger($limit)
-    RETURN collect(result) AS results
-  `;
+  // Match the user and their preferences
+  MATCH (u:User {id: $userId})-[:HAS_PREFERENCES]->(p:UserPreferences)
+
+  // Get user's favorite cuisines and allergens
+  MATCH (p)-[:PREFERS]->(favCuisine:Cuisine)
+  OPTIONAL MATCH (p)-[:EXCLUDES]->(allergen:Allergen)
+  WITH u, collect(DISTINCT favCuisine.name) as userCuisines,
+       collect(DISTINCT allergen.name) as userAllergens,
+       p.skillLevel as userSkillLevel
+
+  // Find recipes matching user preferences
+  MATCH (r:Recipe)
+  WHERE NOT EXISTS {
+    MATCH (r)<-[:PRESENT_IN]-(a:Allergen)
+    WHERE a.name IN userAllergens
+  }
+
+  // Match recipe relationships for scoring
+  MATCH (r)-[:HAS_CUISINE]->(c:Cuisine)
+  MATCH (r)<-[:USED_IN]-(i:Ingredient)
+  MATCH (r)<-[:PRESENT_IN]-(a:Allergen)
+  MATCH (r)-[:SUITABLE_FOR]->(o:Occasion)
+  MATCH (r)-[:BEST_IN]->(s:Season)
+  MATCH (r)-[:HAS_STEP]->(prep:PreparationStep)
+
+  // Calculate average rating
+  OPTIONAL MATCH (r)<-[rate:RATED]-()
+  WITH r, c, i, a, o, s, prep, userSkillLevel, userCuisines,
+       CASE 
+         WHEN count(rate) > 0 THEN round(10 * avg(rate.rating)) / 10
+         ELSE 0.0 
+       END as avgRating
+
+  // Get current season based on month
+  WITH r, c, i, a, o, s, prep, userSkillLevel, userCuisines, avgRating,
+       CASE 
+         WHEN datetime().month IN [12,1,2] THEN 'Winter'
+         WHEN datetime().month IN [3,4,5] THEN 'Spring'
+         WHEN datetime().month IN [6,7,8] THEN 'Summer'
+         WHEN datetime().month IN [9,10,11] THEN 'Fall'
+       END as currentSeason
+
+  // Calculate recipe difficulty score based on user skill level
+  WITH r, c, i, a, o, s, prep, avgRating, currentSeason, userSkillLevel, userCuisines,
+       CASE 
+         WHEN r.difficulty = 'easy' THEN 
+           CASE toLower(userSkillLevel)
+             WHEN 'beginner' THEN 3.0
+             WHEN 'intermediate' THEN 1.0
+             WHEN 'advanced' THEN 0.0
+             ELSE 2.0
+           END
+         WHEN r.difficulty = 'medium' THEN 
+           CASE toLower(userSkillLevel)
+             WHEN 'beginner' THEN 1.0
+             WHEN 'intermediate' THEN 3.0
+             WHEN 'advanced' THEN 1.0
+             ELSE 2.0
+           END
+         WHEN r.difficulty = 'hard' THEN
+           CASE toLower(userSkillLevel)
+             WHEN 'beginner' THEN 0.0
+             WHEN 'intermediate' THEN 1.0
+             WHEN 'advanced' THEN 3.0
+             ELSE 1.0
+           END
+         ELSE 1.0
+       END as difficultyScore
+
+  // Calculate cuisine match score
+  WITH r, c, i, a, o, s, prep, difficultyScore, avgRating, currentSeason, userCuisines,
+       toFloat(CASE WHEN c.name IN userCuisines THEN 2 ELSE 0 END) as cuisineScore
+
+  // Calculate seasonal score
+  WITH r, c, i, a, o, s, prep, difficultyScore, cuisineScore, avgRating,
+       toFloat(CASE WHEN s.name = currentSeason THEN 1 ELSE 0 END) as seasonalScore
+
+  // Aggregate all scores and recipe information
+WITH r, c, collect(DISTINCT i.name) as ingredients,
+     collect(DISTINCT a.name) as allergens,
+     collect(DISTINCT o.name) as occasions,
+     collect(DISTINCT s.name) as seasons,
+     prep.description as preparationSteps,
+     difficultyScore, cuisineScore, seasonalScore, avgRating,
+     (
+       difficultyScore + 
+       cuisineScore + 
+       seasonalScore + 
+       coalesce(toFloat(r.popularityScore), 0.0) / 20.0 + 
+       avgRating
+     ) as totalScore
+
+// Construct the recipe map
+WITH {
+          id: r.id,
+          name: r.name,
+          difficulty: r.difficulty,
+          cookingTime: r.cooking_time,
+          servingSize: r.serving_size,
+          calories: r.calories,
+          cost: r.cost,
+          popularityScore: r.popularityScore,
+          seasonalAvailability: r.seasonal_availability,
+          ingredients: ingredients,
+          allergens: allergens,
+          cuisine: c.name,
+          occasions: occasions,
+          seasons: seasons,
+          preparationSteps: preparationSteps,
+          rating: avgRating
+      } as recipe,
+     totalScore
+
+// Return the recipes sorted by totalScore
+RETURN recipe
+ORDER BY totalScore DESC
+  LIMIT toInteger($limit)
+`;
 
   const result = neo4j.executeQuery(hostName, query, vars);
-
-  const recipes: SearchResult[] = [];
+  const recipes: Recipe[] = [];
   for (let i = 0; i < result.Records.length; i++) {
-    const record = result.Records[i];
-    const results = record.getValue<SearchResult[]>("results");
-    for (let j = 0; j < results.length; j++) {
-      const resultObj = results[j];
-      recipes.push(
-        new SearchResult(
-          new Recipe(
-            resultObj.recipe.id,
-            resultObj.recipe.name,
-            resultObj.recipe.difficulty,
-            resultObj.recipe.cookingTime,
-            resultObj.recipe.servingSize,
-            resultObj.recipe.calories,
-            resultObj.recipe.cost,
-            resultObj.recipe.popularityScore,
-            resultObj.recipe.seasonalAvailability,
-            resultObj.recipe.cuisine,
-            resultObj.recipe.preparationSteps,
-            resultObj.recipe.rating,
-            resultObj.recipe.ingredients,
-            resultObj.recipe.allergens,
-            resultObj.recipe.occasions,
-            resultObj.recipe.seasons,
-            resultObj.recipe.favourite,
-          ),
-          resultObj.score,
-        ),
-      );
-    }
+    recipes.push(JSON.parse<Recipe>(result.Records[i].get("recipe")));
   }
   return recipes;
 }
-
 /**
  * Find similar recipes based on ingredients and cuisine
  */
