@@ -76,7 +76,27 @@ export class UserPreferences {
   dietaryRestrictions: string[] = [];
   allergens: string[] = [];
   favoriteCuisines: string[] = [];
-  skillLevel: string = "beginner";
+  skillLevel: string = "Easy";
+}
+
+@json
+export class UserPreferencesResponse {
+  dietaryRestrictions: string[] = [];
+  allergens: string[] = [];
+  favoriteCuisines: string[] = [];
+  skillLevel: string = "Easy";
+
+  constructor(
+    dietaryRestrictions:string[],
+    allergens: string[],
+    favoriteCuisines: string[],
+    skillLevel:string
+  ){
+    this.dietaryRestrictions=dietaryRestrictions;
+    this.allergens=allergens;
+    this.favoriteCuisines=favoriteCuisines;
+    this.skillLevel=skillLevel;
+  }
 }
 
 

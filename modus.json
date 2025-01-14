@@ -17,7 +17,7 @@
   "connections": {
     "neo4jsandbox": {
       "type": "neo4j",
-      "dbUri": "neo4j+s://fd5de847.databases.neo4j.io",
+      "dbUri": "bolt://35.170.55.226:7687",
       "username": "neo4j",
       "password": "{{NEO4J_PASSWORD}}"
     },
